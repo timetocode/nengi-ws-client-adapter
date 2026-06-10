@@ -4,75 +4,104 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WsClientAdapter = void 0;
-const nengi_1 = require("nengi");
 const ws_1 = __importDefault(require("ws"));
 const nengi_buffers_1 = require("nengi-buffers");
+function toBuffer(data) {
+    if (Buffer.isBuffer(data)) {
+        return data;
+    }
+    if (Array.isArray(data)) {
+        return Buffer.concat(data);
+    }
+    if (data instanceof ArrayBuffer) {
+        return Buffer.from(data);
+    }
+    const view = data;
+    return Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+}
 class WsClientAdapter {
-    constructor(network) {
+    constructor(network, config = {}) {
+        var _a;
+        this.connected = false;
+        this.stats = {
+            snapshotsReceived: 0,
+            bytesReceived: 0,
+            bytesSent: 0
+        };
         this.socket = null;
         this.network = network;
-        this.context = this.network.client.context;
+        this.binary = (_a = config.binary) !== null && _a !== void 0 ? _a : nengi_buffers_1.bufferBinary;
     }
     flush() {
         if (!this.socket) {
-            console.log('CANCELED, no socket');
             return;
         }
         if (this.socket.readyState !== ws_1.default.OPEN) {
-            console.log('socket not open');
             return;
         }
-        const buffer = this.network.createOutboundBuffer(nengi_buffers_1.BufferWriter);
+        const buffer = this.network.createOutbound(this.binary);
+        this.stats.bytesSent += buffer.byteLength;
         this.socket.send(buffer);
+    }
+    disconnect(code = 1000, reason = 'closed') {
+        var _a;
+        (_a = this.socket) === null || _a === void 0 ? void 0 : _a.close(code, reason);
     }
     setupWebsocket(socket) {
         this.socket = socket;
-        socket.on('message', (data) => {
-            // @ts-ignore
-            const dr = new nengi_buffers_1.BufferReader(Buffer.from(data));
+        socket.removeAllListeners('message');
+        socket.on('message', data => {
+            const buffer = toBuffer(data);
+            this.stats.snapshotsReceived++;
+            this.stats.bytesReceived += buffer.byteLength;
+            const dr = this.binary.createReader(buffer);
             this.network.readSnapshot(dr);
         });
-        socket.onclose = function (event) {
-            console.log('sock closed');
-            console.log(event);
-            // TODO
-        };
-        socket.onerror = function (event) {
-            console.log('socket error');
-            console.log(event);
-            // TODO
-        };
+        socket.removeAllListeners('close');
+        socket.on('close', (code, reason) => {
+            this.connected = false;
+            this.network.onDisconnect(reason.toString() || `closed:${code}`);
+        });
+        socket.removeAllListeners('error');
+        socket.on('error', event => {
+            this.network.onSocketError(event);
+        });
     }
     connect(wsUrl, handshake) {
         return new Promise((resolve, reject) => {
             const socket = new ws_1.default(wsUrl, { perMessageDeflate: false });
-            socket.onopen = (event) => {
-                socket.send(this.network.createHandshakeBuffer(handshake, nengi_buffers_1.BufferWriter));
-            };
-            socket.onclose = function (event) {
-                reject(event);
-            };
-            socket.onerror = function (event) {
-                reject(event);
-            };
-            socket.on('message', (data) => {
-                // initially the only thing we care to read is a response to our handshake
-                // we don't even setup the parser for the rest of what a nengi client can receive
-                // @ts-ignore
-                const dr = new nengi_buffers_1.BufferReader(Buffer.from(data));
-                const type = dr.readUInt8(); // type of message
-                if (type === nengi_1.BinarySection.EngineMessages) {
-                    const count = dr.readUInt8(); // quantity of engine messages
-                    const connectionResponseByte = dr.readUInt8();
-                    if (connectionResponseByte === nengi_1.EngineMessage.ConnectionAccepted) {
-                        // setup listeners for normal game data
-                        this.setupWebsocket(socket);
-                        resolve('accepted');
-                    }
-                    if (connectionResponseByte === nengi_1.EngineMessage.ConnectionDenied) {
-                        const denyReason = JSON.parse(dr.readString());
-                        reject(denyReason);
-                    }
+            this.socket = socket;
+            let settled = false;
+            socket.on('open', () => {
+                socket.send(this.network.createHandshake(handshake, this.binary));
+            });
+            socket.on('close', (code, reason) => {
+                if (!settled) {
+                    settled = true;
+                    reject(reason.toString() || `closed:${code}`);
+                    return;
+                }
+                this.connected = false;
+                this.network.onDisconnect(reason.toString() || `closed:${code}`);
+            });
+            socket.on('error', event => {
+                this.network.onSocketError(event);
+                if (!settled) {
+                    settled = true;
+                    reject(event);
+                }
+            });
+            socket.on('message', data => {
+                const result = this.network.readHandshakeResponse(this.binary.createReader(toBuffer(data)));
+                if (result.accepted) {
+                    settled = true;
+                    this.connected = true;
+                    this.setupWebsocket(socket);
+                    resolve(result);
+                }
+                else {
+                    settled = true;
+                    reject(result.reason);
                 }
             });
         });

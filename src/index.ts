@@ -1,96 +1,128 @@
 import {
-    EngineMessage,
-    BinarySection,
-    ClientNetwork,
-    Context
+    ClientNetwork
 } from 'nengi'
+import type { BinaryAdapter, IClientNetworkAdapter } from 'nengi'
 
-import WebSocket from 'ws'
-import { BufferReader, BufferWriter } from 'nengi-buffers'
+import WebSocket, { RawData } from 'ws'
+import { bufferBinary } from 'nengi-buffers'
 
-class WsClientAdapter {
+function toBuffer(data: RawData): Buffer {
+    if (Buffer.isBuffer(data)) {
+        return data
+    }
+    if (Array.isArray(data)) {
+        return Buffer.concat(data)
+    }
+    if (data instanceof ArrayBuffer) {
+        return Buffer.from(data)
+    }
+    const view = data as ArrayBufferView
+    return Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+}
+
+export type WsClientAdapterStats = {
+    snapshotsReceived: number
+    bytesReceived: number
+    bytesSent: number
+}
+
+class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
     socket: WebSocket | null
     network: ClientNetwork
-    context: Context
+    binary: BinaryAdapter<Buffer>
+    connected = false
+    stats: WsClientAdapterStats = {
+        snapshotsReceived: 0,
+        bytesReceived: 0,
+        bytesSent: 0
+    }
 
-    constructor(network: ClientNetwork) {
+    constructor(network: ClientNetwork, config: any = {}) {
         this.socket = null
         this.network = network
-        this.context = this.network.client.context
+        this.binary = config.binary ?? bufferBinary
     }
 
     flush() {
         if (!this.socket) {
-            console.log('CANCELED, no socket')
             return
         }
 
         if (this.socket!.readyState !== WebSocket.OPEN) {
-            console.log('socket not open')
             return
         }
 
-        const buffer = this.network.createOutboundBuffer(BufferWriter)
+        const buffer = this.network.createOutbound(this.binary)
+        this.stats.bytesSent += buffer.byteLength
         this.socket!.send(buffer)
     }
 
-    setupWebsocket(socket: WebSocket) {
+    disconnect(code = 1000, reason = 'closed') {
+        this.socket?.close(code, reason)
+    }
+
+    private setupWebsocket(socket: WebSocket) {
         this.socket = socket
 
-        socket.on('message', (data) => {
-            // @ts-ignore
-            const dr = new BufferReader(Buffer.from(data))
+        socket.removeAllListeners('message')
+        socket.on('message', data => {
+            const buffer = toBuffer(data)
+            this.stats.snapshotsReceived++
+            this.stats.bytesReceived += buffer.byteLength
+            const dr = this.binary.createReader(buffer)
             this.network.readSnapshot(dr)
-
         })
 
-        socket.onclose = function (event) {
-            console.log('sock closed')
-            console.log(event)
-            // TODO
-        }
+        socket.removeAllListeners('close')
+        socket.on('close', (code, reason) => {
+            this.connected = false
+            this.network.onDisconnect(reason.toString() || `closed:${code}`)
+        })
 
-        socket.onerror = function (event) {
-            console.log('socket error')
-            console.log(event)
-            // TODO
-        }
+        socket.removeAllListeners('error')
+        socket.on('error', event => {
+            this.network.onSocketError(event)
+        })
     }
 
     connect(wsUrl: string, handshake: any) {
         return new Promise((resolve, reject) => {
             const socket = new WebSocket(wsUrl, { perMessageDeflate: false })
+            this.socket = socket
+            let settled = false
 
-            socket.onopen = (event) => {
-                socket.send(this.network.createHandshakeBuffer(handshake, BufferWriter))
-            }
+            socket.on('open', () => {
+                socket.send(this.network.createHandshake(handshake, this.binary))
+            })
 
-            socket.onclose = function (event) {
-                reject(event)
-            }
+            socket.on('close', (code, reason) => {
+                if (!settled) {
+                    settled = true
+                    reject(reason.toString() || `closed:${code}`)
+                    return
+                }
+                this.connected = false
+                this.network.onDisconnect(reason.toString() || `closed:${code}`)
+            })
 
-            socket.onerror = function (event) {
-                reject(event)
-            }
+            socket.on('error', event => {
+                this.network.onSocketError(event)
+                if (!settled) {
+                    settled = true
+                    reject(event)
+                }
+            })
 
-            socket.on('message', (data) => {
-                // initially the only thing we care to read is a response to our handshake
-                // we don't even setup the parser for the rest of what a nengi client can receive
-                // @ts-ignore
-                const dr = new BufferReader(Buffer.from(data))
-                const type = dr.readUInt8() // type of message
-                if (type === BinarySection.EngineMessages) {
-                    const count = dr.readUInt8() // quantity of engine messages
-                    const connectionResponseByte = dr.readUInt8()
-                    if (connectionResponseByte === EngineMessage.ConnectionAccepted) {
-                        // setup listeners for normal game data
-                        this.setupWebsocket(socket)
-                        resolve('accepted')
-                    }
-                    if (connectionResponseByte === EngineMessage.ConnectionDenied) {
-                        const denyReason = JSON.parse(dr.readString())
-                        reject(denyReason)
-                    }
+            socket.on('message', data => {
+                const result = this.network.readHandshakeResponse(this.binary.createReader(toBuffer(data)))
+                if (result.accepted) {
+                    settled = true
+                    this.connected = true
+                    this.setupWebsocket(socket)
+                    resolve(result)
+                } else {
+                    settled = true
+                    reject(result.reason)
                 }
             })
         })
