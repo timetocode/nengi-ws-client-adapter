@@ -1,7 +1,4 @@
-import {
-    ClientNetwork
-} from 'nengi'
-import type { BinaryAdapter, IClientNetworkAdapter } from 'nengi'
+import type { BinaryAdapter, ClientNetwork, IClientNetworkAdapter } from 'nengi'
 
 import WebSocket, { RawData } from 'ws'
 import { bufferBinary } from 'nengi-buffers'

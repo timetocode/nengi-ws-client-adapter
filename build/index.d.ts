@@ -1,5 +1,4 @@
-import { ClientNetwork } from 'nengi';
-import type { BinaryAdapter, IClientNetworkAdapter } from 'nengi';
+import type { BinaryAdapter, ClientNetwork, IClientNetworkAdapter } from 'nengi';
 import WebSocket from 'ws';
 export type WsClientAdapterStats = {
     snapshotsReceived: number;
