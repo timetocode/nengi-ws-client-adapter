@@ -82,7 +82,7 @@ class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
         })
     }
 
-    connect(wsUrl: string, handshake: any) {
+    connect(wsUrl: string, handshake: any = {}) {
         return new Promise((resolve, reject) => {
             const socket = new WebSocket(wsUrl, { perMessageDeflate: false })
             this.socket = socket

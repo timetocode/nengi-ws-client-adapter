@@ -15,6 +15,6 @@ declare class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, s
     flush(): void;
     disconnect(code?: number, reason?: string): void;
     private setupWebsocket;
-    connect(wsUrl: string, handshake: any): Promise<unknown>;
+    connect(wsUrl: string, handshake?: any): Promise<unknown>;
 }
 export { WsClientAdapter };

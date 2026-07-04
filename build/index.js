@@ -67,7 +67,7 @@ class WsClientAdapter {
             this.network.onSocketError(event);
         });
     }
-    connect(wsUrl, handshake) {
+    connect(wsUrl, handshake = {}) {
         return new Promise((resolve, reject) => {
             const socket = new ws_1.default(wsUrl, { perMessageDeflate: false });
             this.socket = socket;

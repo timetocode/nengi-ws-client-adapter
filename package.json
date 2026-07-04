@@ -1,6 +1,6 @@
 {
   "name": "nengi-ws-client-adapter",
-  "version": "2.0.0-rc.121",
+  "version": "2.0.0-rc.123",
   "description": "ws adapter for nengi client",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
@@ -32,10 +32,10 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "nengi-buffers": "2.0.0-rc.121",
+    "nengi-buffers": "2.0.0-rc.123",
     "ws": "^8.17.1"
   },
   "peerDependencies": {
-    "nengi": "2.0.0-rc.121"
+    "nengi": "2.0.0-rc.123"
   }
 }
