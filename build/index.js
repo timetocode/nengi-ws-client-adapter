@@ -43,9 +43,10 @@ class WsClientAdapter {
         this.stats.bytesSent += buffer.byteLength;
         this.socket.send(buffer);
     }
-    disconnect(code = 1000, reason = 'closed') {
+    disconnect(reason) {
         var _a;
-        (_a = this.socket) === null || _a === void 0 ? void 0 : _a.close(code, reason);
+        const payload = typeof reason === 'string' ? reason : JSON.stringify(reason !== null && reason !== void 0 ? reason : 'closed');
+        (_a = this.socket) === null || _a === void 0 ? void 0 : _a.close(1000, payload);
     }
     setupWebsocket(socket) {
         this.socket = socket;

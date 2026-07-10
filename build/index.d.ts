@@ -13,7 +13,7 @@ declare class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, s
     stats: WsClientAdapterStats;
     constructor(network: ClientNetwork, config?: any);
     flush(): void;
-    disconnect(code?: number, reason?: string): void;
+    disconnect(reason?: any): void;
     private setupWebsocket;
     connect(wsUrl: string, handshake?: any): Promise<unknown>;
 }

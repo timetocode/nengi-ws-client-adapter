@@ -54,8 +54,9 @@ class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
         this.socket!.send(buffer)
     }
 
-    disconnect(code = 1000, reason = 'closed') {
-        this.socket?.close(code, reason)
+    disconnect(reason?: any) {
+        const payload = typeof reason === 'string' ? reason : JSON.stringify(reason ?? 'closed')
+        this.socket?.close(1000, payload)
     }
 
     private setupWebsocket(socket: WebSocket) {
