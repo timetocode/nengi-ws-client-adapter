@@ -7,9 +7,9 @@ service-to-service Nengi connections.
 Keep the complete Nengi package family on one exact version:
 
 ```sh
-npm install nengi@2.0.0-rc.126 \
-    nengi-ws-client-adapter@2.0.0-rc.126 \
-    nengi-buffers@2.0.0-rc.126
+npm install nengi@2.0.0-rc.127 \
+    nengi-ws-client-adapter@2.0.0-rc.127 \
+    nengi-buffers@2.0.0-rc.127
 ```
 
 ```ts
