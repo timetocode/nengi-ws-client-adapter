@@ -1,8 +1,9 @@
 import { NetworkConditionLink } from 'nengi';
-import type { BinaryAdapter, ClientNetwork, IClientNetworkAdapter, NetworkConditions, NetworkConditionStatus } from 'nengi';
+import type { BinaryAdapter, ClientTransportHandlers, IClientNetworkAdapter, NetworkConditions, NetworkConditionStatus } from 'nengi';
 import WebSocket from 'ws';
 export type WsClientAdapterStats = {
-    snapshotsReceived: number;
+    /** Binary transport messages, including the connection handshake. */
+    messagesReceived: number;
     bytesReceived: number;
     bytesSent: number;
 };
@@ -13,32 +14,21 @@ export type SimulatedWsClientAdapterConfig = WsClientAdapterConfig & {
     conditions: NetworkConditions;
 };
 declare class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
+    readonly clientAdapterVersion: 2;
     socket: WebSocket | null;
-    network: ClientNetwork;
     binary: BinaryAdapter<Buffer>;
-    connected: boolean;
+    protected link?: NetworkConditionLink;
+    private handlers;
     stats: WsClientAdapterStats;
-    constructor(network: ClientNetwork, config?: WsClientAdapterConfig);
-    flush(): void;
-    flushPongs(): void;
-    disconnect(reason?: any): void;
-    private setupWebsocket;
-    connect(wsUrl: string, handshake?: any): Promise<unknown>;
+    constructor(config?: WsClientAdapterConfig);
+    open(url: string, handlers: ClientTransportHandlers<Buffer>): void;
+    send(payload: Buffer): void;
+    close(reason: string, force: boolean): void;
 }
-declare class SimulatedWsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
-    socket: WebSocket | null;
-    network: ClientNetwork;
-    binary: BinaryAdapter<Buffer>;
-    connected: boolean;
-    stats: WsClientAdapterStats;
+declare class SimulatedWsClientAdapter extends WsClientAdapter {
     readonly conditions: NetworkConditionLink;
-    constructor(network: ClientNetwork, config: SimulatedWsClientAdapterConfig);
-    flush(): void;
-    flushPongs(): void;
-    disconnect(reason?: any): void;
+    constructor(config: SimulatedWsClientAdapterConfig);
     configureNetworkConditions(conditions: NetworkConditions): void;
     getNetworkConditionStatus(): NetworkConditionStatus;
-    connect(wsUrl: string, handshake?: any): Promise<unknown>;
-    private send;
 }
 export { WsClientAdapter, SimulatedWsClientAdapter };

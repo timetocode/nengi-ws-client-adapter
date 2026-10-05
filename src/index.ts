@@ -1,33 +1,23 @@
-import {
-    NetworkConditionLink
-} from 'nengi'
+import { NetworkConditionLink } from 'nengi'
 import type {
     BinaryAdapter,
-    ClientNetwork,
+    ClientTransportHandlers,
     IClientNetworkAdapter,
     NetworkConditions,
     NetworkConditionStatus
 } from 'nengi'
-
 import WebSocket, { RawData } from 'ws'
 import { bufferBinary } from 'nengi-buffers'
 
 function toBuffer(data: RawData): Buffer {
-    if (Buffer.isBuffer(data)) {
-        return data
-    }
-    if (Array.isArray(data)) {
-        return Buffer.concat(data)
-    }
-    if (data instanceof ArrayBuffer) {
-        return Buffer.from(data)
-    }
-    const view = data as ArrayBufferView
-    return Buffer.from(view.buffer, view.byteOffset, view.byteLength)
+    if (Buffer.isBuffer(data)) return data
+    if (Array.isArray(data)) return Buffer.concat(data)
+    return Buffer.from(data)
 }
 
 export type WsClientAdapterStats = {
-    snapshotsReceived: number
+    /** Binary transport messages, including the connection handshake. */
+    messagesReceived: number
     bytesReceived: number
     bytesSent: number
 }
@@ -50,171 +40,103 @@ const liveTimers = {
 }
 
 class WsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
-    socket: WebSocket | null
-    network: ClientNetwork
+    readonly clientAdapterVersion = 2 as const
+    socket: WebSocket | null = null
     binary: BinaryAdapter<Buffer>
-    connected = false
-    stats: WsClientAdapterStats = {
-        snapshotsReceived: 0,
-        bytesReceived: 0,
-        bytesSent: 0
-    }
+    protected link?: NetworkConditionLink
+    private handlers: ClientTransportHandlers<Buffer> | null = null
+    stats: WsClientAdapterStats = { messagesReceived: 0, bytesReceived: 0, bytesSent: 0 }
 
-    constructor(network: ClientNetwork, config: WsClientAdapterConfig = {}) {
-        this.socket = null
-        this.network = network
+    constructor(config: WsClientAdapterConfig = {}) {
         this.binary = config.binary ?? bufferBinary
     }
 
-    flush() {
-        if (!this.socket) {
-            return
-        }
-
-        if (this.socket!.readyState !== WebSocket.OPEN) {
-            return
-        }
-
-        const buffer = this.network.createOutbound(this.binary)
-        this.stats.bytesSent += buffer.byteLength
-        this.socket!.send(buffer)
-    }
-
-    flushPongs() {
-        const socket = this.socket
-        if (!socket || socket.readyState !== WebSocket.OPEN || !this.connected) {
-            return
-        }
-        try {
-            this.network.flushPongs(this.binary, payload => {
-                this.stats.bytesSent += payload.byteLength
-                socket.send(payload)
-            })
-        } catch (error) {
-            this.network.onSocketError(error)
-        }
-    }
-
-    disconnect(reason?: any) {
-        const payload = typeof reason === 'string' ? reason : JSON.stringify(reason ?? 'closed')
-        this.socket?.close(1000, payload)
-    }
-
-    private setupWebsocket(socket: WebSocket) {
+    open(url: string, handlers: ClientTransportHandlers<Buffer>) {
+        const socket = new WebSocket(url, { perMessageDeflate: false })
         this.socket = socket
-
-        socket.removeAllListeners('message')
-        socket.on('message', data => {
-            const buffer = toBuffer(data)
-            this.stats.snapshotsReceived++
-            this.stats.bytesReceived += buffer.byteLength
-            const dr = this.binary.createReader(buffer)
-            this.network.readSnapshot(dr)
+        this.handlers = handlers
+        socket.on('open', () => {
+            if (this.socket === socket) handlers.onOpen()
         })
-
-        socket.removeAllListeners('close')
+        socket.on('message', (data, isBinary) => {
+            if (this.socket !== socket) return
+            if (!isBinary) {
+                handlers.onError(new Error('The nengi transport requires binary messages.'))
+                return
+            }
+            const payload = toBuffer(data)
+            const deliver = (message: Buffer) => {
+                if (this.socket !== socket) return
+                this.stats.messagesReceived++
+                this.stats.bytesReceived += message.byteLength
+                handlers.onMessage(message)
+            }
+            if (this.link) this.link.sendServerToClient(payload, deliver)
+            else deliver(payload)
+        })
         socket.on('close', (code, reason) => {
-            this.connected = false
-            this.network.onDisconnect(reason.toString() || `closed:${code}`)
+            if (this.socket !== socket) return
+            this.socket = null
+            this.handlers = null
+            this.link?.clear()
+            handlers.onClose({ code, reason: reason.toString() })
         })
-
-        socket.removeAllListeners('error')
-        socket.on('error', event => {
-            this.network.onSocketError(event)
+        // Keep an error listener even after cancellation: ws can emit an error
+        // asynchronously when terminate() aborts an unfinished HTTP upgrade.
+        socket.on('error', cause => {
+            if (this.socket === socket) handlers.onError(cause)
         })
     }
 
-    connect(wsUrl: string, handshake: any = {}) {
-        return new Promise((resolve, reject) => {
-            const socket = new WebSocket(wsUrl, { perMessageDeflate: false })
-            this.socket = socket
-            let settled = false
+    send(payload: Buffer) {
+        const socket = this.socket
+        const handlers = this.handlers
+        // The pending close event owns the reason; a late flush must not replace it.
+        if (socket && (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED)) return
+        if (!socket || socket.readyState !== WebSocket.OPEN) throw new Error('The WebSocket transport is not open.')
+        const deliver = (message: Buffer) => {
+            if (this.socket !== socket) return
+            try {
+                if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return
+                if (socket.readyState !== WebSocket.OPEN) throw new Error('The WebSocket transport is not open.')
+                socket.send(message, error => {
+                    if (error && this.socket === socket) handlers?.onError(error)
+                })
+                this.stats.bytesSent += message.byteLength
+            } catch (cause) {
+                handlers?.onError(cause)
+            }
+        }
+        if (this.link) this.link.sendClientToServer(payload, deliver)
+        else deliver(payload)
+    }
 
-            socket.on('open', () => {
-                socket.send(this.network.createHandshake(handshake, this.binary))
-            })
-
-            socket.on('close', (code, reason) => {
-                if (!settled) {
-                    settled = true
-                    reject(reason.toString() || `closed:${code}`)
-                    return
-                }
-                this.connected = false
-                this.network.onDisconnect(reason.toString() || `closed:${code}`)
-            })
-
-            socket.on('error', event => {
-                this.network.onSocketError(event)
-                if (!settled) {
-                    settled = true
-                    reject(event)
-                }
-            })
-
-            socket.on('message', data => {
-                const result = this.network.readHandshakeResponse(this.binary.createReader(toBuffer(data)))
-                if (result.accepted) {
-                    settled = true
-                    this.connected = true
-                    this.setupWebsocket(socket)
-                    resolve(result)
-                } else {
-                    settled = true
-                    reject(result.reason)
-                }
-            })
-        })
+    close(reason: string, force: boolean) {
+        const socket = this.socket
+        this.socket = null
+        this.handlers = null
+        this.link?.clear()
+        if (!socket) return
+        if (force || socket.readyState === WebSocket.CONNECTING) {
+            socket.terminate()
+        } else {
+            try {
+                socket.close(1000, reason)
+            } catch {
+                socket.terminate()
+            }
+        }
     }
 }
 
-class SimulatedWsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, string> {
-    socket: WebSocket | null = null
-    network: ClientNetwork
-    binary: BinaryAdapter<Buffer>
-    connected = false
-    stats: WsClientAdapterStats = {
-        snapshotsReceived: 0,
-        bytesReceived: 0,
-        bytesSent: 0
-    }
+class SimulatedWsClientAdapter extends WsClientAdapter {
     readonly conditions: NetworkConditionLink
 
-    constructor(network: ClientNetwork, config: SimulatedWsClientAdapterConfig) {
-        if (!config?.conditions) {
-            throw new Error('SimulatedWsClientAdapter requires config.conditions.')
-        }
-        this.network = network
-        this.binary = config.binary ?? bufferBinary
-        this.conditions = new NetworkConditionLink(config.conditions, {
-            timers: liveTimers
-        })
-    }
-
-    flush() {
-        if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.connected) {
-            return
-        }
-        this.send(this.network.createOutbound(this.binary))
-    }
-
-    flushPongs() {
-        if (!this.socket || this.socket.readyState !== WebSocket.OPEN || !this.connected) {
-            return
-        }
-        try {
-            this.network.flushPongs(this.binary, payload => this.send(payload))
-        } catch (error) {
-            this.network.onSocketError(error)
-        }
-    }
-
-    disconnect(reason?: any) {
-        this.conditions.clear()
-        const payload = typeof reason === 'string' ? reason : JSON.stringify(reason ?? 'closed')
-        this.socket?.close(1000, payload)
-        this.socket = null
-        this.connected = false
+    constructor(config: SimulatedWsClientAdapterConfig) {
+        super(config)
+        if (!config?.conditions) throw new Error('SimulatedWsClientAdapter requires config.conditions.')
+        this.conditions = new NetworkConditionLink(config.conditions, { timers: liveTimers })
+        this.link = this.conditions
     }
 
     configureNetworkConditions(conditions: NetworkConditions) {
@@ -223,89 +145,6 @@ class SimulatedWsClientAdapter implements IClientNetworkAdapter<Buffer, Buffer, 
 
     getNetworkConditionStatus(): NetworkConditionStatus {
         return this.conditions.status()
-    }
-
-    connect(wsUrl: string, handshake: any = {}) {
-        return new Promise((resolve, reject) => {
-            const socket = new WebSocket(wsUrl, { perMessageDeflate: false })
-            this.socket = socket
-            let settled = false
-
-            socket.on('open', () => {
-                this.send(this.network.createHandshake(handshake, this.binary), false)
-            })
-
-            socket.on('close', (code, reason) => {
-                const wasConnected = this.connected
-                this.conditions.clear()
-                this.socket = null
-                this.connected = false
-                const detail = reason.toString() || `closed:${code}`
-                if (!settled) {
-                    settled = true
-                    reject(detail)
-                    return
-                }
-                if (wasConnected) {
-                    this.network.onDisconnect(detail)
-                }
-            })
-
-            socket.on('error', event => {
-                this.network.onSocketError(event)
-                if (!settled) {
-                    settled = true
-                    reject(event)
-                    this.conditions.clear()
-                    socket.close()
-                }
-            })
-
-            socket.on('message', data => {
-                const buffer = toBuffer(data)
-                this.conditions.sendServerToClient(buffer, payload => {
-                    if (socket !== this.socket || socket.readyState !== WebSocket.OPEN) {
-                        return
-                    }
-                    if (settled && !this.connected) {
-                        return
-                    }
-                    if (!this.connected) {
-                        const result = this.network.readHandshakeResponse(this.binary.createReader(payload))
-                        if (result.accepted) {
-                            settled = true
-                            this.connected = true
-                            resolve(result)
-                        } else {
-                            settled = true
-                            socket.close(1000, typeof result.reason === 'string'
-                                ? result.reason
-                                : JSON.stringify(result.reason ?? 'closed'))
-                            reject(result.reason)
-                        }
-                        return
-                    }
-                    this.stats.bytesReceived += payload.byteLength
-                    this.stats.snapshotsReceived++
-                    this.network.readSnapshot(this.binary.createReader(payload))
-                })
-            })
-        })
-    }
-
-    private send(buffer: Buffer, trackStats = true) {
-        const socket = this.socket
-        if (!socket) {
-            return
-        }
-        this.conditions.sendClientToServer(buffer, payload => {
-            if (socket === this.socket && socket.readyState === WebSocket.OPEN) {
-                if (trackStats) {
-                    this.stats.bytesSent += payload.byteLength
-                }
-                socket.send(payload)
-            }
-        })
     }
 }
 
